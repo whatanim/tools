@@ -1,83 +1,96 @@
 import socket
-import threading
+import select
 import logging
-import sys
+import time
 
-# Configure logging to write to a file
+# Configuration
+TCP_PORTS = [5000, 5001]
+UDP_PORTS = [5002, 5003]
+HOST = '0.0.0.0'  # Listen on all available interfaces
+LOG_FILE = 'connection_log.txt'
+
+# Set up logging to a file
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
-                    filename='connections.log',
-                    filemode='a') # Append mode
+                    filename=LOG_FILE,
+                    filemode='a') # 'a' for append mode
 
-console = logging.StreamHandler()
-console.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-console.setFormatter(formatter)
-logging.getLogger('').addHandler(console)
+def setup_sockets(host, tcp_ports, udp_ports):
+    """Creates and binds TCP and UDP sockets."""
+    sockets = []
+    
+    # Setup TCP sockets
+    for port in tcp_ports:
+        try:
+            tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Reuse address
+            tcp_sock.bind((host, port))
+            tcp_sock.listen(5) # Listen for up to 5 queued connections
+            sockets.append(tcp_sock)
+            logging.info(f"TCP server listening on {host}:{port}")
+        except Exception as e:
+            logging.error(f"Failed to set up TCP port {port}: {e}")
 
-HOST = '0.0.0.0'  # Listen on all available interfaces
-TCP_PORT = 65432  # Non-privileged port for TCP
-UDP_PORT = 65433  # Non-privileged port for UDP
+    # Setup UDP sockets
+    for port in udp_ports:
+        try:
+            udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_sock.bind((host, port))
+            sockets.append(udp_sock)
+            logging.info(f"UDP server listening on {host}:{port}")
+        except Exception as e:
+            logging.error(f"Failed to set up UDP port {port}: {e}")
+            
+    return sockets
 
-def handle_tcp_client(conn, addr):
-    """Handle a single TCP client connection."""
-    logging.info(f"TCP connection established from {addr}")
+def handle_tcp_connection(sock):
+    """Handles a new TCP connection."""
     try:
-        with conn:
-            # You can add logic here to handle data exchange
-            while True:
-                data = conn.recv(1024)
-                if not data:
-                    break
-                # Optional: log received data
-                # logging.info(f"Received data from {addr[0]}:{addr[1]}: {data.decode()}")
-                conn.sendall(data) # Echo data back
+        conn, addr = sock.accept()
+        logging.info(f"New TCP connection from: {addr[0]}:{addr[1]} on port {sock.getsockname()[1]}")
+        # In a real application, you would handle data exchange here, possibly in a new thread.
+        # For this example, we just log the connection and close it after a brief interaction.
+        conn.sendall(b"Hello from the TCP server!\n")
+        conn.close()
     except Exception as e:
-        logging.error(f"Error with TCP connection from {addr}: {e}")
+        logging.error(f"Error handling TCP connection: {e}")
+
+def handle_udp_packet(sock):
+    """Handles a new UDP packet."""
+    try:
+        data, addr = sock.recvfrom(1024) # Buffer size is 1024 bytes
+        logging.info(f"Received UDP packet from: {addr[0]}:{addr[1]} on port {sock.getsockname()[1]}. Data: {data.decode().strip()}")
+        # You can send a response back to the client if needed
+        # sock.sendto(b"ACK\n", addr)
+    except Exception as e:
+        logging.error(f"Error handling UDP packet: {e}")
+
+def main():
+    listening_sockets = setup_sockets(HOST, TCP_PORTS, UDP_PORTS)
+    if not listening_sockets:
+        print("No sockets are listening. Exiting.")
+        return
+
+    print(f"Server running, logging connections to {LOG_FILE}. Press Ctrl+C to stop.")
+    
+    try:
+        while True:
+            # Use select to wait for I/O readiness on any of the sockets
+            readable, _, _ = select.select(listening_sockets, [], [])
+            
+            for sock in readable:
+                if sock.type == socket.SOCK_STREAM:
+                    handle_tcp_connection(sock)
+                elif sock.type == socket.SOCK_DGRAM:
+                    handle_udp_packet(sock)
+                else:
+                    logging.warning("Unknown socket type received")
+    except KeyboardInterrupt:
+        print("Server is shutting down.")
     finally:
-        logging.info(f"TCP connection closed with {addr}")
-
-def start_tcp_server():
-    """Starts the TCP server."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        try:
-            s.bind((HOST, TCP_PORT))
-            s.listen()
-            logging.info(f"TCP server listening on {HOST}:{TCP_PORT}")
-            while True:
-                conn, addr = s.accept()
-                # Start a new thread to handle the client connection
-                client_thread = threading.Thread(target=handle_tcp_client, args=(conn, addr))
-                client_thread.start()
-        except Exception as e:
-            logging.error(f"Failed to start TCP server: {e}")
-            sys.exit(1)
-
-def start_udp_server():
-    """Starts the UDP server."""
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        try:
-            s.bind((HOST, UDP_PORT))
-            logging.info(f"UDP server listening on {HOST}:{UDP_PORT}")
-            while True:
-                # recvfrom returns data and the client's address
-                data, addr = s.recvfrom(1024)
-                # For UDP, the 'connection' is connectionless, but we log the sender's address
-                logging.info(f"Received UDP packet from {addr}")
-                # Optional: log received data
-                # logging.info(f"Received data via UDP from {addr[0]}:{addr[1]}: {data.decode()}")
-                s.sendto(data, addr) # Echo data back
-        except Exception as e:
-            logging.error(f"Failed to start UDP server: {e}")
-            sys.exit(1)
+        for sock in listening_sockets:
+            sock.close()
+        logging.info("Server stopped and sockets closed.")
 
 if __name__ == "__main__":
-    # Run both servers concurrently in separate threads
-    tcp_thread = threading.Thread(target=start_tcp_server)
-    udp_thread = threading.Thread(target=start_udp_server)
-
-    tcp_thread.start()
-    udp_thread.start()
-
-    tcp_thread.join()
-    udp_thread.join()
+    main()
